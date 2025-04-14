@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NYC School Bus Route Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+     crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+     crossorigin=""></script>
+    <script src='https://cdn.plot.ly/plotly-latest.min.js'></script>
+    <style>
+        /* Basic styling for map and plot */
+        #map { height: 500px; width: 100%; }
+        /* Renamed plot container ID back */
+        #parcoordsPlot { min-height: 500px; width: 100%; }
+        /* Ensure table cells don't wrap excessively */
+        .results-table th, .results-table td { white-space: nowrap; padding: 8px 12px; }
+        /* Custom scrollbar for table container */
+        .table-container::-webkit-scrollbar { width: 8px; height: 8px;}
+        .table-container::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px;}
+        .table-container::-webkit-scrollbar-thumb { background: #888; border-radius: 10px;}
+        .table-container::-webkit-scrollbar-thumb:hover { background: #555; }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans p-4 md:p-8">
+
+    <div class="max-w-7xl mx-auto bg-white shadow-lg rounded-lg p-6">
+        <h1 class="text-2xl font-bold text-center text-gray-800 mb-6">NYC School Bus Route Simulator (Brooklyn)</h1>
+
+        <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mb-6">
+            <div class="flex items-center gap-2">
+                <label for="numRoutes" class="text-gray-700">Routes to Simulate:</label>
+                <input type="number" id="numRoutes" value="10" min="1" max="50" class="border rounded px-2 py-1 w-20 text-center">
+            </div>
+            <button id="startSim" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition duration-300 ease-in-out">
+                Start Simulation
+            </button>
+        </div>
+
+        <div id="status" class="text-center text-gray-600 mb-4 h-6"></div>
+
+        <h2 class="text-xl font-semibold text-gray-700 mb-3">Simulation Results</h2>
+        <div class="table-container overflow-x-auto border border-gray-200 rounded-lg mb-6 max-h-80 overflow-y-auto">
+            <table class="min-w-full divide-y divide-gray-200 results-table">
+                <thead class="bg-gray-50 sticky top-0">
+                    <tr>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Route ID</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Feasible</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Directness Ratio</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Turns/Mile</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Depot-First (mi)</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Seg (mi)</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Stops/Mile</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">% Hwy</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">% Non-Hwy</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Stops</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actual Time (min)</th>
+                        <th scope="col" class="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actual Dist (mi)</th>
+                    </tr>
+                </thead>
+                <tbody id="resultsBody" class="bg-white divide-y divide-gray-200">
+                    </tbody>
+            </table>
+        </div>
+
+        <h2 class="text-xl font-semibold text-gray-700 mb-3">Route Visualization</h2>
+        <div id="map" class="border border-gray-300 rounded-lg shadow-sm mb-6"></div>
+
+        <h2 class="text-xl font-semibold text-gray-700 mb-3">Parallel Coordinates Plot</h2>
+        <div id="parcoordsPlot" class="border border-gray-300 rounded-lg shadow-sm">
+             <p class="text-center text-gray-500 p-4">Run simulation to generate plot.</p>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const DEPOT_LOC = { lat: 40.72834552660796, lon: -73.94051392594677 };
+        const BROOKLYN_BOUNDS = { minLat: 40.5700, maxLat: 40.7400, minLon: -74.0400, maxLon: -73.8300 };
+        const SUBREGION_HEIGHT_DEG = 0.08;
+        const SUBREGION_WIDTH_DEG = 0.10;
+        const OSRM_SERVER = 'https://router.project-osrm.org';
+        const HIGHWAY_SPEED_THRESHOLD_MPS = 20; // Approx 45 mph threshold for highway classification proxy
+
+        // Simulation Parameters
+        const MIN_PICKUPS = 5;
+        const MAX_PICKUPS = 10;
+        const MAX_SCHOOLS = 7;
+        const FIRST_PICKUP_START_HOUR = 6;
+        const FIRST_PICKUP_END_HOUR = 7;
+        const SCHOOL_START_HOUR_MIN = 8;
+        const SCHOOL_START_HOUR_MAX = 9;
+        const FIRST_PICKUP_WAIT_MIN_S = 60;
+        const FIRST_PICKUP_WAIT_MAX_S = 180;
+        const OTHER_WAIT_S = 60;
+        const SCHOOL_WAIT_S = 0;
+        const MAX_ROUTE_DISTANCE_MILES = 45;
+        const MAX_GENERATION_ATTEMPTS = 10;
+
+        // Feasibility Criteria
+        const MAX_ARRIVAL_DELAY_MINS = 20;
+        const MAX_FIRST_PICKUP_TRAVEL_TIME_MINS = 90;
+
+        // --- DOM Elements ---
+        const startBtn = document.getElementById('startSim');
+        const numRoutesInput = document.getElementById('numRoutes');
+        const statusDiv = document.getElementById('status');
+        const resultsBody = document.getElementById('resultsBody');
+        const mapDiv = document.getElementById('map');
+        const plotDiv = document.getElementById('parcoordsPlot'); // Renamed back
+
+        // --- Global State ---
+        let map = null;
+        let routeLayers = null;
+        let allResultsData = [];
+
+        // --- Leaflet Map Initialization ---
+        function initializeMap() { if (map) { map.remove(); } map = L.map(mapDiv).setView([40.65, -73.95], 12); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap contributors' }).addTo(map); routeLayers = L.layerGroup().addTo(map); L.marker([DEPOT_LOC.lat, DEPOT_LOC.lon], { title: "Depot" }).bindPopup("<b>Depot</b>").addTo(map); }
+        initializeMap();
+
+        // --- Helper Functions ---
+        function getRandomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+        function getRandomFloat(min, max) { return Math.random() * (max - min) + min; }
+        function getRandomSubRegion(overallBounds, widthDeg, heightDeg) { const centerLat = getRandomFloat( overallBounds.minLat + heightDeg / 2, overallBounds.maxLat - heightDeg / 2 ); const centerLon = getRandomFloat( overallBounds.minLon + widthDeg / 2, overallBounds.maxLon - widthDeg / 2 ); return { minLat: centerLat - heightDeg / 2, maxLat: centerLat + heightDeg / 2, minLon: centerLon - widthDeg / 2, maxLon: centerLon + widthDeg / 2 }; }
+        function getRandomLocInBounds(bounds) { return { lat: getRandomFloat(bounds.minLat, bounds.maxLat), lon: getRandomFloat(bounds.minLon, bounds.maxLon) }; }
+        function getRandomTimeInSeconds(startHour, endHour) { const startSeconds = startHour * 3600; const endSeconds = endHour * 3600; return getRandomInt(startSeconds, endSeconds - 1); }
+        function formatTime(seconds) { if (seconds === undefined || seconds === null || isNaN(seconds)) return 'N/A'; const h = Math.floor(seconds / 3600); const m = Math.floor((seconds % 3600) / 60); return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`; }
+        function haversineDistance(coords1, coords2) { const R = 6371e3; const φ1 = coords1.lat * Math.PI/180; const φ2 = coords2.lat * Math.PI/180; const Δφ = (coords2.lat-coords1.lat) * Math.PI/180; const Δλ = (coords2.lon-coords1.lon) * Math.PI/180; const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2) * Math.sin(Δλ/2); const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); return R * c; }
+        function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+        const MILES_PER_METER = 0.000621371;
+
+        // --- OSRM API Call Function ---
+        async function getOsrmRoute(locations) {
+            if (!Array.isArray(locations) || locations.length < 2) { console.error("Invalid locations:", locations); statusDiv.textContent = `Error: Invalid location data.`; return null; }
+            if (locations.some(loc => loc === null || loc === undefined || isNaN(loc.lat) || isNaN(loc.lon))) { console.error("Invalid coordinates:", locations); statusDiv.textContent = `Error: Invalid coordinate data.`; return null; }
+            const coordsString = locations.map(loc => `${loc.lon},${loc.lat}`).join(';');
+            // Ensure annotations=true is requested
+            const url = `${OSRM_SERVER}/route/v1/driving/${coordsString}?overview=full&geometries=geojson&steps=true&annotations=true`;
+            try { const response = await fetch(url); if (!response.ok) { let errorBody = null; try { errorBody = await response.json(); } catch(e) {} throw new Error(`OSRM request failed: ${response.statusText} ${response.status} ${errorBody ? `- ${errorBody.message}` : ''}`); } const data = await response.json(); if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) { throw new Error(`OSRM API Error: ${data.code} - ${data.message || 'No route found'}`); } return data.routes[0]; }
+            catch (error) { console.error("OSRM Fetch Error:", error); statusDiv.textContent = `Error fetching route: ${error.message}. Check console.`; if (error.message.includes('429')) { statusDiv.textContent += ' (Rate limit likely exceeded)'; } return null; }
+        }
+
+        // --- Simulation Logic ---
+        async function runSimulation() {
+            startBtn.disabled = true;
+            startBtn.textContent = 'Simulating...';
+            statusDiv.textContent = 'Starting simulation...';
+            resultsBody.innerHTML = '';
+            routeLayers.clearLayers();
+            plotDiv.innerHTML = '<p class="text-center text-gray-500 p-4">Simulation running, generating plot data...</p>';
+            allResultsData = [];
+
+            const numRoutes = parseInt(numRoutesInput.value);
+            let feasibleCount = 0;
+            let generatedCount = 0;
+
+            for (let i = 1; i <= numRoutes; i++) {
+                statusDiv.textContent = `Generating Route ${i} of ${numRoutes}...`;
+                let osrmRouteData = null;
+                let actualDistanceMiles = Infinity;
+                let generationAttempts = 0;
+                let numPickups, numSchools, allLocations, schoolStartTimesS;
+                let routeSubRegion = null;
+
+                // Generation Loop
+                do {
+                    generationAttempts++;
+                    statusDiv.textContent = `Generating Route ${i} (Attempt ${generationAttempts})...`;
+                    await delay(100);
+                    numPickups = getRandomInt(MIN_PICKUPS, MAX_PICKUPS);
+                    numSchools = getRandomInt(1, MAX_SCHOOLS);
+                    routeSubRegion = getRandomSubRegion(BROOKLYN_BOUNDS, SUBREGION_WIDTH_DEG, SUBREGION_HEIGHT_DEG);
+                    const pickupLocs = Array.from({ length: numPickups }, () => getRandomLocInBounds(routeSubRegion));
+                    const schoolLocs = Array.from({ length: numSchools }, () => getRandomLocInBounds(routeSubRegion));
+                    schoolStartTimesS = schoolLocs.map(() => getRandomTimeInSeconds(SCHOOL_START_HOUR_MIN, SCHOOL_START_HOUR_MAX));
+                    allLocations = [DEPOT_LOC, ...pickupLocs, ...schoolLocs];
+                    osrmRouteData = await getOsrmRoute(allLocations);
+                    if (osrmRouteData) {
+                        actualDistanceMiles = osrmRouteData.distance * MILES_PER_METER;
+                        if (actualDistanceMiles < MAX_ROUTE_DISTANCE_MILES) { break; }
+                        else { statusDiv.textContent = `Generating Route ${i} (Attempt ${generationAttempts}) - Dist ${actualDistanceMiles.toFixed(1)} mi > ${MAX_ROUTE_DISTANCE_MILES} mi. Retrying...`; osrmRouteData = null; }
+                    } else { break; } // OSRM error
+                    await delay(200);
+                } while (generationAttempts < MAX_GENERATION_ATTEMPTS);
+
+                // Check generation success
+                if (!osrmRouteData) {
+                    statusDiv.textContent = `Failed to generate Route ${i} under ${MAX_ROUTE_DISTANCE_MILES} miles within ${generationAttempts} attempts. Skipping.`;
+                    addResultRow(i, false, `Generation Failed (Dist Limit)`, null, null, null, null, null, null, null, numPickups + numSchools, null, actualDistanceMiles === Infinity ? null : actualDistanceMiles); // Add nulls for new cols
+                    allResultsData.push({ routeId: i, feasible: 0, reason: 'Generation Failed (Dist Limit)' });
+                    await delay(500);
+                    continue;
+                }
+
+                // --- Process valid route ---
+                generatedCount++;
+                statusDiv.textContent = `Processing Route ${i} (Dist: ${actualDistanceMiles.toFixed(1)} mi)...`;
+
+                const routeGeometry = osrmRouteData.geometry;
+                const routeDistanceMeters = osrmRouteData.distance;
+                const routeDurationSeconds = osrmRouteData.legs.reduce((sum, leg) => sum + leg.duration, 0);
+                const routeLegs = osrmRouteData.legs;
+                const routeSteps = routeLegs.flatMap(leg => leg.steps);
+
+                // 3. Simulate Timing (Same logic)
+                const earliestPossibleFirstPickupS = FIRST_PICKUP_START_HOUR * 3600; const latestPossibleFirstPickupS = FIRST_PICKUP_END_HOUR * 3600 - 1; const travelToFirstPickupS = routeLegs[0]?.duration ?? 30 * 60; const depotDepartureS = earliestPossibleFirstPickupS - travelToFirstPickupS - (5 * 60); let currentTimeS = depotDepartureS < 0 ? 0 : depotDepartureS; let firstPickupActualDepartureS = -1; let firstSchoolArrivalTimeS = -1; let totalWaitTimeS = 0; const arrivalTimesS = []; const departureTimesS = []; arrivalTimesS[0] = currentTimeS; departureTimesS[0] = currentTimeS; let currentLegStartTimeS = currentTimeS;
+                for(let legIdx = 0; legIdx < routeLegs.length; legIdx++) { const legDurationS = routeLegs[legIdx].duration; let arrivalAtStopS = currentLegStartTimeS + legDurationS; let departureFromStopS = arrivalAtStopS; let waitTimeS = 0; const stopIndex = legIdx + 1; if (stopIndex === 1) { if (arrivalAtStopS < earliestPossibleFirstPickupS) { waitTimeS = earliestPossibleFirstPickupS - arrivalAtStopS; arrivalAtStopS = earliestPossibleFirstPickupS; } if (arrivalAtStopS > latestPossibleFirstPickupS) { console.warn(`Route ${i}: Arrived at first pickup (${formatTime(arrivalAtStopS)}) after window closed.`); } waitTimeS += getRandomInt(FIRST_PICKUP_WAIT_MIN_S, FIRST_PICKUP_WAIT_MAX_S); departureFromStopS = arrivalAtStopS + waitTimeS; firstPickupActualDepartureS = departureFromStopS; } else if (stopIndex > 1 && stopIndex <= numPickups) { waitTimeS = OTHER_WAIT_S; departureFromStopS = arrivalAtStopS + waitTimeS; } else { waitTimeS = SCHOOL_WAIT_S; departureFromStopS = arrivalAtStopS + waitTimeS; if (stopIndex === numPickups + 1 && firstSchoolArrivalTimeS === -1) { firstSchoolArrivalTimeS = arrivalAtStopS; } } arrivalTimesS[stopIndex] = arrivalAtStopS; departureTimesS[stopIndex] = departureFromStopS; totalWaitTimeS += waitTimeS; currentLegStartTimeS = departureFromStopS; }
+                const totalRouteTimeFromDepotS = (arrivalTimesS[arrivalTimesS.length - 1] ?? currentLegStartTimeS) - depotDepartureS;
+
+                // 4. Calculate Feasibility (Same logic)
+                let isFeasible = true; let feasibilityReason = "OK"; const firstSchoolTargetStartS = schoolStartTimesS[0]; if (firstSchoolArrivalTimeS === -1 || firstSchoolArrivalTimeS > firstSchoolTargetStartS + (MAX_ARRIVAL_DELAY_MINS * 60)) { isFeasible = false; feasibilityReason = `Late to first school (Arrival: ${formatTime(firstSchoolArrivalTimeS)}, Target: ${formatTime(firstSchoolTargetStartS)})`; } if (isFeasible && firstPickupActualDepartureS !== -1 && firstSchoolArrivalTimeS !== -1) { const firstPickupTravelTimeS = firstSchoolArrivalTimeS - firstPickupActualDepartureS; if (firstPickupTravelTimeS < 0) { console.error(`Route ${i}: Negative travel time.`); } else if (firstPickupTravelTimeS > (MAX_FIRST_PICKUP_TRAVEL_TIME_MINS * 60)) { isFeasible = false; feasibilityReason = `First pickup travel time exceeded (${Math.round(firstPickupTravelTimeS / 60)} min)`; } } else if (isFeasible) { isFeasible = false; feasibilityReason = `Timing calculation error`; }
+                if (isFeasible) { feasibleCount++; }
+
+                // 5. Calculate Heuristics (Existing + New + Highway%)
+                let directnessRatio = null; let turnsPerMile = null; let depotToFirstDistMiles = null; let avgSegmentDistMiles = null; let stopsPerMile = null; let pctHighway = null; let pctNonHighway = null;
+                // Directness
+                let crowFliesSegmentSumMeters = 0; for (let j = 0; j < allLocations.length - 1; j++) { if(allLocations[j] && allLocations[j+1]) { crowFliesSegmentSumMeters += haversineDistance(allLocations[j], allLocations[j + 1]); } else { console.warn(`Route ${i}: Invalid location data.`); crowFliesSegmentSumMeters = 0; break; } } if (routeDistanceMeters > 0 && crowFliesSegmentSumMeters > 0) { directnessRatio = crowFliesSegmentSumMeters / routeDistanceMeters; }
+                // Turns
+                let turnCount = 0; routeSteps.forEach(step => { if (step.maneuver && step.maneuver.type) { const type = step.maneuver.type; if (type.includes('turn') || type.includes('fork') || type.includes('roundabout') || type.startsWith('exit')) { if (!type.includes('slight') && !type.includes('sharp')) { turnCount++; } } else if (type === 'continue' && step.maneuver.modifier && step.maneuver.modifier.includes('turn')) { if (!step.maneuver.modifier.includes('slight') && !step.maneuver.modifier.includes('sharp')) { turnCount++; } } } }); if (actualDistanceMiles > 0) { turnsPerMile = turnCount / actualDistanceMiles; }
+                // Depot to First Pickup Distance
+                if (routeLegs.length > 0) { depotToFirstDistMiles = routeLegs[0].distance * MILES_PER_METER; }
+                // Average Segment Distance (excluding depot leg)
+                const stopLegs = routeLegs.slice(1); if (stopLegs.length > 0) { const totalStopLegDistanceMeters = stopLegs.reduce((sum, leg) => sum + leg.distance, 0); avgSegmentDistMiles = (totalStopLegDistanceMeters / stopLegs.length) * MILES_PER_METER; }
+                // Stops Per Mile
+                const totalStops = numPickups + numSchools; if (actualDistanceMiles > 0) { stopsPerMile = totalStops / actualDistanceMiles; }
+
+                // << NEW: Calculate Highway/Non-Highway Percentage using Annotations >>
+                let highwayDistanceMeters = 0;
+                let nonHighwayDistanceMeters = 0;
+                try {
+                    routeLegs.forEach(leg => {
+                        // Check if annotations exist for this leg
+                        if (leg.annotation && leg.annotation.distance && leg.annotation.duration &&
+                            leg.annotation.distance.length === leg.annotation.duration.length) {
+                            const distances = leg.annotation.distance;
+                            const durations = leg.annotation.duration;
+                            for (let j = 0; j < distances.length; j++) {
+                                const dist_m = distances[j];
+                                const dur_s = durations[j];
+                                if (dist_m > 0 && dur_s > 0.1) { // Avoid division by zero or near-zero duration
+                                    const speed_mps = dist_m / dur_s;
+                                    if (speed_mps >= HIGHWAY_SPEED_THRESHOLD_MPS) {
+                                        highwayDistanceMeters += dist_m;
+                                    } else {
+                                        nonHighwayDistanceMeters += dist_m;
+                                    }
+                                } else if (dist_m > 0) {
+                                    // If duration is zero/tiny but distance exists, assume non-highway
+                                    nonHighwayDistanceMeters += dist_m;
+                                }
+                            }
+                        } else {
+                            // Fallback if annotations missing for a leg: classify whole leg based on average speed
+                            if (leg.distance > 0 && leg.duration > 0.1) {
+                                const avgSpeed_mps = leg.distance / leg.duration;
+                                if (avgSpeed_mps >= HIGHWAY_SPEED_THRESHOLD_MPS) {
+                                    highwayDistanceMeters += leg.distance;
+                                } else {
+                                    nonHighwayDistanceMeters += leg.distance;
+                                }
+                            } else {
+                                nonHighwayDistanceMeters += leg.distance; // Default to non-hwy if info missing
+                            }
+                            console.warn(`Route ${i}: Missing or mismatched annotations for a leg. Used fallback classification.`);
+                        }
+                    });
+
+                    // Calculate percentages
+                    if (routeDistanceMeters > 0) {
+                        pctHighway = (highwayDistanceMeters / routeDistanceMeters) * 100;
+                        pctNonHighway = (nonHighwayDistanceMeters / routeDistanceMeters) * 100;
+                        // Small adjustment for potential floating point summing issues
+                         pctNonHighway = 100 - pctHighway;
+                    } else {
+                        pctHighway = 0;
+                        pctNonHighway = 100;
+                    }
+                } catch (annotError) {
+                    console.error(`Route ${i}: Error processing annotations:`, annotError);
+                    pctHighway = null; // Mark as null if error occurs
+                    pctNonHighway = null;
+                }
+                // << END NEW SECTION >>
+
+
+                // Store results
+                 const resultData = {
+                    routeId: i, feasible: isFeasible ? 1 : 0, reason: feasibilityReason,
+                    directnessRatio: directnessRatio, turnsPerMile: turnsPerMile,
+                    depotToFirstDistMiles: depotToFirstDistMiles,
+                    avgSegmentDistMiles: avgSegmentDistMiles,
+                    stopsPerMile: stopsPerMile,
+                    pctHighway: pctHighway,             // New
+                    pctNonHighway: pctNonHighway,       // New
+                    stops: totalStops, timeMins: Math.round(totalRouteTimeFromDepotS / 60),
+                    distMiles: actualDistanceMiles
+                };
+                allResultsData.push(resultData);
+
+                // 6. Update UI (Table and Map)
+                addResultRow( resultData.routeId, isFeasible, resultData.reason, resultData.directnessRatio, resultData.turnsPerMile, resultData.depotToFirstDistMiles, resultData.avgSegmentDistMiles, resultData.stopsPerMile, resultData.pctHighway, resultData.pctNonHighway, resultData.stops, resultData.timeMins, resultData.distMiles ); // Pass new metrics
+                const routeColor = isFeasible ? 'green' : 'red'; const routeWeight = isFeasible ? 3 : 2; try { L.geoJSON(routeGeometry, { style: { color: routeColor, weight: routeWeight, opacity: 0.7 } }).bindPopup(`<b>Route ${i}</b><br>Feasible: ${isFeasible ? 'Yes' : 'No'}<br>Reason: ${feasibilityReason}<br>Directness: ${directnessRatio?.toFixed(3) ?? 'N/A'}<br>Turns/Mile: ${turnsPerMile?.toFixed(2) ?? 'N/A'}<br>Dist: ${actualDistanceMiles.toFixed(1)} mi`).addTo(routeLayers); } catch (mapError) { console.error(`Route ${i}: Error adding route to map: `, mapError); }
+
+            } // End of simulation loop
+
+            statusDiv.textContent = `Simulation complete. Generated ${generatedCount} valid routes (< ${MAX_ROUTE_DISTANCE_MILES} mi). ${feasibleCount} feasible routes found.`;
+            startBtn.disabled = false;
+            startBtn.textContent = 'Start Simulation';
+
+            drawParallelCoordinatesPlot(allResultsData); // Call reverted plot function
+
+        }
+
+        // --- Function to Add Row to Results Table (Updated) ---
+        function addResultRow(routeId, isFeasible, reason, directness, turnsPerMile, depotToFirst, avgSeg, stopsPerMile, pctHwy, pctNonHwy, stops, timeMins, distMiles) {
+            const row = resultsBody.insertRow();
+            row.insertCell().textContent = routeId;
+            const feasibleCell = row.insertCell();
+            feasibleCell.textContent = isFeasible ? 'Yes' : (reason.startsWith('Generation Failed') ? 'N/A' : 'No');
+            feasibleCell.className = isFeasible ? 'text-green-600 font-semibold' : (reason.startsWith('Generation Failed') ? 'text-gray-500' : 'text-red-600 font-semibold');
+            row.insertCell().textContent = reason;
+            row.insertCell().textContent = directness?.toLocaleString(undefined, {minimumFractionDigits: 3, maximumFractionDigits: 3}) ?? 'N/A';
+            row.insertCell().textContent = turnsPerMile?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) ?? 'N/A';
+            row.insertCell().textContent = depotToFirst?.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 1}) ?? 'N/A';
+            row.insertCell().textContent = avgSeg?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) ?? 'N/A';
+            row.insertCell().textContent = stopsPerMile?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) ?? 'N/A';
+            // Add new cells for highway %
+            row.insertCell().textContent = pctHwy?.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 1}) ?? 'N/A';
+            row.insertCell().textContent = pctNonHwy?.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 1}) ?? 'N/A';
+            // Existing cells
+            row.insertCell().textContent = stops ?? 'N/A';
+            row.insertCell().textContent = timeMins?.toLocaleString() ?? 'N/A';
+            row.insertCell().textContent = distMiles?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) ?? 'N/A';
+        }
+
+
+        // --- Reverted Function to Draw Parallel Coordinates Plot ---
+        function drawParallelCoordinatesPlot(data) {
+            plotDiv.innerHTML = ''; // Clear placeholder or previous plot
+            if (!data || data.length === 0) { plotDiv.innerHTML = '<p class="text-center text-gray-500 p-4">No data available to generate plot.</p>'; return; }
+
+            // Filter out routes that failed generation or have null essential values
+            const validData = data.filter(d =>
+                d.reason !== 'Generation Failed (Dist Limit)' &&
+                typeof d.feasible === 'number' &&
+                d.directnessRatio !== null && !isNaN(d.directnessRatio) &&
+                d.turnsPerMile !== null && !isNaN(d.turnsPerMile) &&
+                d.depotToFirstDistMiles !== null && !isNaN(d.depotToFirstDistMiles) &&
+                d.avgSegmentDistMiles !== null && !isNaN(d.avgSegmentDistMiles) &&
+                d.stopsPerMile !== null && !isNaN(d.stopsPerMile) &&
+                d.pctHighway !== null && !isNaN(d.pctHighway) && // Check new features
+                d.pctNonHighway !== null && !isNaN(d.pctNonHighway) && // Check new features
+                d.stops !== null && !isNaN(d.stops) &&
+                d.timeMins !== null && !isNaN(d.timeMins) &&
+                d.distMiles !== null && !isNaN(d.distMiles)
+            );
+
+             if (validData.length === 0) { plotDiv.innerHTML = '<p class="text-center text-gray-500 p-4">Insufficient valid route data to generate plot.</p>'; return; }
+
+            // Define dimensions including the new ones
+            const dimensions = [
+                { label: 'Directness Ratio', values: validData.map(d => d.directnessRatio) },
+                { label: 'Turns/Mile', values: validData.map(d => d.turnsPerMile) },
+                { label: 'Depot-First (mi)', values: validData.map(d => d.depotToFirstDistMiles) },
+                { label: 'Avg Seg (mi)', values: validData.map(d => d.avgSegmentDistMiles) },
+                { label: 'Stops/Mile', values: validData.map(d => d.stopsPerMile) },
+                { label: '% Hwy', values: validData.map(d => d.pctHighway), range: [0, 100] }, // Add new dimension
+                { label: '% Non-Hwy', values: validData.map(d => d.pctNonHighway), range: [0, 100] }, // Add new dimension
+                { label: 'Stops', values: validData.map(d => d.stops) },
+                { label: 'Time (min)', values: validData.map(d => d.timeMins) },
+                { label: 'Distance (mi)', values: validData.map(d => d.distMiles) },
+                { label: 'Feasible', values: validData.map(d => d.feasible), tickvals: [0, 1], ticktext: ['No', 'Yes'] }
+            ];
+
+            const plotData = [{
+                type: 'parcoords',
+                line: {
+                    color: validData.map(d => d.feasible),
+                    colorscale: [[0, 'red'], [1, 'green']], // 0=No(Red), 1=Yes(Green)
+                    showscale: false
+                },
+                dimensions: dimensions
+            }];
+
+            const layout = {
+                title: `Route Characteristics (Parallel Coordinates) - ${validData.length} Routes < ${MAX_ROUTE_DISTANCE_MILES} mi`,
+                margin: { l: 80, r: 50, b: 50, t: 80 } // Adjust margins if needed
+            };
+
+            try {
+                 Plotly.newPlot(plotDiv, plotData, layout);
+            } catch(plotError) {
+                console.error("Plotly Error:", plotError);
+                plotDiv.innerHTML = '<p class="text-center text-red-500 p-4">Error generating plot. Check console.</p>';
+            }
+        }
+
+
+        // --- Event Listener ---
+        startBtn.addEventListener('click', runSimulation);
+    </script>
+
+</body>
+</html>
